@@ -1,10 +1,12 @@
 *.swp
+.vimrc
 
 build
 bin
 res
 tmp
-include/res
 
 data
 output
+
+src/caffe2/util/model.pb.*

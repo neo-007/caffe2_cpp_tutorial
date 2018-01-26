@@ -3,7 +3,7 @@
 #include "caffe2/util/model.h"
 #include "caffe2/util/net.h"
 
-#include "caffe2/util/window.h"
+#include "cvplot/cvplot.h"
 
 #ifdef WITH_CUDA
 #include <caffe2/core/context_gpu.h>
@@ -13,7 +13,7 @@ CAFFE2_DEFINE_string(train_db, "res/mnist-train-nchw-leveldb",
                      "The given path to the training leveldb.");
 CAFFE2_DEFINE_string(test_db, "res/mnist-test-nchw-leveldb",
                      "The given path to the testing leveldb.");
-CAFFE2_DEFINE_int(epochs, 100, "The of training runs.");
+CAFFE2_DEFINE_int(iters, 100, "The of training runs.");
 CAFFE2_DEFINE_int(test_runs, 50, "The of test runs.");
 CAFFE2_DEFINE_bool(force_cpu, false, "Only use CPU, no CUDA.");
 CAFFE2_DEFINE_bool(display, false, "Display graphical training info.");
@@ -100,7 +100,8 @@ void AddTrainingOperators(ModelUtil &model) {
   AddAccuracy(model);
 
   // >>> model.AddGradientOperators([loss])
-  model.AddGradientOps();
+  model.predict.AddConstantFillWithOp(1.0, "loss", "loss_grad");
+  model.predict.AddGradientOps();
 
   // >>> LR = model.LearningRate(ITER, "LR", base_lr=-0.1, policy="step",
   // stepsize=1, gamma=0.999 )
@@ -164,7 +165,7 @@ void run() {
 
   std::cout << "train-db: " << FLAGS_train_db << std::endl;
   std::cout << "test-db: " << FLAGS_test_db << std::endl;
-  std::cout << "epochs: " << FLAGS_epochs << std::endl;
+  std::cout << "iters: " << FLAGS_iters << std::endl;
   std::cout << "test-runs: " << FLAGS_test_runs << std::endl;
   std::cout << "force-cpu: " << (FLAGS_force_cpu ? "true" : "false")
             << std::endl;
@@ -180,15 +181,15 @@ void run() {
 #endif
 
   if (FLAGS_display) {
-    superWindow("Caffe2 MNIST Tutorial");
-    moveWindow("undercertain", 0, 0);
-    resizeWindow("undercertain", 300, 300);
-    moveWindow("overcertain", 0, 300);
-    resizeWindow("overcertain", 300, 300);
-    moveWindow("accuracy", 300, 0);
-    resizeWindow("accuracy", 300, 300);
-    moveWindow("loss", 300, 300);
-    resizeWindow("loss", 300, 300);
+    cvplot::Window::current("Caffe2 MNIST Tutorial");
+    cvplot::moveWindow("undercertain", 0, 0);
+    cvplot::resizeWindow("undercertain", 300, 300);
+    cvplot::moveWindow("overcertain", 0, 300);
+    cvplot::resizeWindow("overcertain", 300, 300);
+    cvplot::moveWindow("accuracy", 300, 0);
+    cvplot::resizeWindow("accuracy", 300, 300);
+    cvplot::moveWindow("loss", 300, 300);
+    cvplot::resizeWindow("loss", 300, 300);
   }
 
   // >>> from caffe2.python import core, cnn, net_drawer, workspace, visualize,
@@ -235,6 +236,7 @@ void run() {
   NetDef deploy_init_model, deploy_predict_model;
   ModelUtil deploy(deploy_init_model, deploy_predict_model, "mnist_model");
   deploy.predict.AddInput("data");
+  deploy.predict.AddOutput("softmax");
 
   // >>> AddLeNetModel(deploy_model, "data")
   AddLeNetModel(deploy, true);
@@ -257,7 +259,7 @@ void run() {
   std::cout << "training.." << std::endl;
 
   // >>> for i in range(total_iters):
-  for (auto i = 1; i <= FLAGS_epochs; i++) {
+  for (auto i = 1; i <= FLAGS_iters; i++) {
     // >>> workspace.RunNet(train_model.net.Proto().name)
     CAFFE_ENFORCE(workspace.RunNet(train.predict.net.name()));
 
@@ -314,6 +316,9 @@ void run() {
     }
     op->add_output(param);
   }
+
+  std::cout << std::endl;
+  std::cout << "saving model.. (tmp/mnist_%_net.pb)" << std::endl;
   deploy.predict.WriteText("tmp/mnist_predict_net.pbtxt");
   deploy.Write("tmp/mnist");
 }
@@ -413,8 +418,7 @@ void predict_example() {
   auto data = workspace.CreateBlob("data")->GetMutable<TensorCPU>();
 #endif
   TensorCPU input({1, 1, 28, 28}, data_for_2, NULL);
-  data->ResizeLike(input);
-  data->ShareData(input);
+  data->CopyFrom(input);
 
   // run predictor
   CAFFE_ENFORCE(workspace.RunNetOnce(predict_model));

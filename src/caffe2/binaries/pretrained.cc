@@ -1,17 +1,18 @@
 #include <caffe2/core/init.h>
-#include <caffe2/core/predictor.h>
+#include <caffe2/core/net.h>
 #include <caffe2/utils/proto_utils.h>
 
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 
-#include "res/imagenet_classes.h"
+#include <fstream>
 
 CAFFE2_DEFINE_string(init_net, "res/squeezenet_init_net.pb",
                      "The given path to the init protobuffer.");
 CAFFE2_DEFINE_string(predict_net, "res/squeezenet_predict_net.pb",
                      "The given path to the predict protobuffer.");
-CAFFE2_DEFINE_string(file, "res/file.jpg", "The image file.");
+CAFFE2_DEFINE_string(file, "res/image_file.jpg", "The image file.");
+CAFFE2_DEFINE_string(classes, "res/imagenet_classes.txt", "The classes file.");
 CAFFE2_DEFINE_int(size, 227, "The image file.");
 
 namespace caffe2 {
@@ -39,6 +40,11 @@ void run() {
 
   if (!std::ifstream(FLAGS_file).good()) {
     std::cerr << "error: Image file missing: " << FLAGS_file << std::endl;
+    return;
+  }
+
+  if (!std::ifstream(FLAGS_classes).good()) {
+    std::cerr << "error: Classes file invalid: " << FLAGS_classes << std::endl;
     return;
   }
 
@@ -84,7 +90,7 @@ void run() {
     data.insert(data.end(), (float *)c.datastart, (float *)c.dataend);
   }
   std::vector<TIndex> dims({1, image.channels(), image.rows, image.cols});
-  TensorCPU input(dims, data, NULL);
+  TensorCPU tensor(dims, data, NULL);
 
   // Load Squeezenet model
   NetDef init_net, predict_net;
@@ -96,12 +102,15 @@ void run() {
   CAFFE_ENFORCE(ReadProtoFromFile(FLAGS_predict_net, &predict_net));
 
   // >>> p = workspace.Predictor(init_net, predict_net)
-  Predictor predictor(init_net, predict_net);
+  Workspace workspace("tmp");
+  CAFFE_ENFORCE(workspace.RunNetOnce(init_net));
+  auto input = workspace.CreateBlob("data")->GetMutable<TensorCPU>();
+  input->ResizeLike(tensor);
+  input->ShareData(tensor);
+  CAFFE_ENFORCE(workspace.RunNetOnce(predict_net));
 
   // >>> results = p.run([img])
-  Predictor::TensorVector inputVec({&input}), outputVec;
-  predictor.run(inputVec, &outputVec);
-  auto &output = *(outputVec[0]);
+  auto output = workspace.GetBlob("softmaxout")->Get<TensorCPU>();
 
   // sort top results
   const auto &probs = output.data<float>();
@@ -116,11 +125,19 @@ void run() {
 
   std::cout << std::endl;
 
+  // read classes
+  std::ifstream file(FLAGS_classes);
+  std::string temp;
+  std::vector<std::string> classes;
+  while (std::getline(file, temp)) {
+    classes.push_back(temp);
+  }
+
   // show results
   std::cout << "output: " << std::endl;
   for (auto pair : pairs) {
-    std::cout << "  " << pair.first << "% '" << imagenet_classes[pair.second]
-              << "' (" << pair.second << ")" << std::endl;
+    std::cout << "  " << pair.first << "% '" << classes[pair.second] << "' ("
+              << pair.second << ")" << std::endl;
   }
 }
 

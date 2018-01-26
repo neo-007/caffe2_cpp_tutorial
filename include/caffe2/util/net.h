@@ -46,8 +46,12 @@ class NetUtil {
                                  const std::string& param);
   OperatorDef* AddXavierFillOp(const std::vector<int>& shape,
                                const std::string& param);
+  OperatorDef* AddMSRAFillOp(const std::vector<int>& shape,
+                             const std::string& param);
   OperatorDef* AddUniformFillOp(const std::vector<int>& shape, float min,
                                 float max, const std::string& param);
+  OperatorDef* AddGausianFillOp(const std::vector<int>& shape, float mean,
+                                float std, const std::string& param);
   OperatorDef* AddConstantFillOp(const std::vector<int>& shape, float value,
                                  const std::string& param);
   OperatorDef* AddConstantFillOp(const std::vector<int>& shape, int64_t value,
@@ -61,9 +65,13 @@ class NetUtil {
 
   OperatorDef* AddConvOp(const std::string& input, const std::string& w,
                          const std::string& b, const std::string& output,
-                         int stride, int padding, int kernel,
+                         int stride, int padding, int kernel, int group = 0,
                          const std::string& order = "NCHW");
   OperatorDef* AddReluOp(const std::string& input, const std::string& output);
+  OperatorDef* AddLeakyReluOp(const std::string& input,
+                              const std::string& output, float alpha);
+  OperatorDef* AddSigmoidOp(const std::string& input,
+                            const std::string& output);
   OperatorDef* AddLrnOp(const std::string& input, const std::string& output,
                         int size, float alpha, float beta, float bias,
                         const std::string& order = "NCHW");
@@ -180,19 +188,18 @@ class NetUtil {
   void SetRenameInplace();
   void SetEngineOps(const std::string engine);
 
-  OperatorDef* AddGradientOp(
-      OperatorDef& op,
-      std::map<std::string, std::pair<int, int>>& split_inputs);
-  OperatorDef* AddGradientOp(OperatorDef& op) {
-    std::map<std::string, std::pair<int, int>> split_inputs;
-    return AddGradientOp(op, split_inputs);
-  }
-  void AddAllGradientOp();
+  OperatorDef* AddGradientOp(OperatorDef& op);
+  OperatorDef* AddGradientOps(
+      OperatorDef& op, std::map<std::string, std::pair<int, int>>& split_inputs,
+      std::map<std::string, std::string>& pass_replace,
+      std::set<std::string>& stop_inputs);
+  void AddGradientOps();
+  void AddGradientOps(NetUtil& target) const;
 
   std::map<std::string, int> CollectParamSizes();
   std::vector<std::string> CollectParams();
   std::vector<OperatorDef> CollectGradientOps(
-      std::map<std::string, std::pair<int, int>>& split_inputs);
+      std::map<std::string, std::pair<int, int>>& split_inputs) const;
   std::set<std::string> CollectLayers(const std::string& layer,
                                       bool forward = false);
 
@@ -202,6 +209,7 @@ class NetUtil {
   void Print();
   size_t Write(const std::string& path) const;
   size_t WriteText(const std::string& path) const;
+  size_t WriteGraph(const std::string& path) const;
   size_t Read(const std::string& path);
 
   void SetDeviceCUDA();

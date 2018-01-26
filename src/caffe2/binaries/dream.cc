@@ -2,15 +2,12 @@
 #include <caffe2/core/net.h>
 #include <caffe2/utils/proto_utils.h>
 #include "caffe2/util/blob.h"
-#include "caffe2/util/plot.h"
 #include "caffe2/util/tensor.h"
-#include "caffe2/util/window.h"
 #include "caffe2/zoo/keeper.h"
+#include "cvplot/cvplot.h"
 
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
-
-#include "res/imagenet_classes.h"
 
 CAFFE2_DEFINE_string(model, "", "Name of one of the pre-trained models.");
 CAFFE2_DEFINE_string(layer, "",
@@ -20,7 +17,7 @@ CAFFE2_DEFINE_int(batch, 1, "The number of channels to process in parallel.");
 CAFFE2_DEFINE_int(size, 400, "The goal image size.");
 
 CAFFE2_DEFINE_string(file, "", "The image file.");
-CAFFE2_DEFINE_int(epochs, 60, "The of training runs.");
+CAFFE2_DEFINE_int(iters, 60, "The of training runs.");
 CAFFE2_DEFINE_int(scale_runs, 10, "The amount of iterations per scale.");
 CAFFE2_DEFINE_int(percent_incr, 40, "Percent increase per round.");
 CAFFE2_DEFINE_int(initial, -17, "The of initial value.");
@@ -31,12 +28,12 @@ CAFFE2_DEFINE_bool(display, false, "Show image while dreaming.");
 
 namespace caffe2 {
 
-void AddNaive(ModelUtil &dream, NetUtil &display, int size) {
+void AddNaive(ModelUtil &dream, NetUtil &display, int size, int colors) {
   auto &input = dream.predict.Input(0);
   auto &output = dream.predict.Output(0);
 
   // initialize input data
-  dream.init.AddUniformFillOp({FLAGS_batch, 3, size, size}, FLAGS_initial,
+  dream.init.AddUniformFillOp({FLAGS_batch, colors, size, size}, FLAGS_initial,
                               FLAGS_initial + 1, input);
 
   // add squared l2 distance to zero as loss
@@ -52,7 +49,7 @@ void AddNaive(ModelUtil &dream, NetUtil &display, int size) {
   }
 
   // add back prop
-  dream.predict.AddAllGradientOp();
+  dream.predict.AddGradientOps();
 
   // scale gradient
   dream.predict.AddMeanStdevOp(input + "_grad", "_", input + "_grad_stdev");
@@ -103,7 +100,7 @@ void run() {
   std::cout << "batch: " << FLAGS_batch << std::endl;
   std::cout << "size: " << FLAGS_size << std::endl;
 
-  std::cout << "epochs: " << FLAGS_epochs << std::endl;
+  std::cout << "iters: " << FLAGS_iters << std::endl;
   std::cout << "scale-runs: " << FLAGS_scale_runs << std::endl;
   std::cout << "percent-incr: " << FLAGS_percent_incr << std::endl;
   std::cout << "initial: " << FLAGS_initial << std::endl;
@@ -115,16 +112,16 @@ void run() {
   if (FLAGS_display) {
     auto size =
         std::min(std::max(400, FLAGS_size), (int)sqrt(800000 / FLAGS_batch));
-    superWindow("Deep Dream Example");
-    moveWindow("loss", 0, 0);
-    resizeWindow("loss", size, size);
-    setWindowTitle("loss", "loss");
+    cvplot::Window::current("Deep Dream Example");
+    cvplot::moveWindow("loss", 0, 0);
+    cvplot::resizeWindow("loss", size, size);
+    cvplot::setWindowTitle("loss", "loss");
     int x_offset = 1, y_offset = 0;
     for (int i = 0; i < FLAGS_batch; i++) {
       auto name = ("dream-" + std::to_string(i)).c_str();
-      moveWindow(name, x_offset * size, y_offset * size);
-      resizeWindow(name, size, size);
-      setWindowTitle(
+      cvplot::moveWindow(name, x_offset * size, y_offset * size);
+      cvplot::resizeWindow(name, size, size);
+      cvplot::setWindowTitle(
           name,
           (FLAGS_layer + " " +
            (FLAGS_channel >= 0 ? std::to_string(FLAGS_channel + i) : "all"))
@@ -148,7 +145,7 @@ void run() {
   // extract dream model
   base.predict.CheckLayerAvailable(FLAGS_layer);
   NetDef init_model, dream_model, display_model, unused_model;
-  NetUtil display(display_model);
+  NetUtil display(display_model, "display");
   ModelUtil dream(init_model, dream_model);
   ModelUtil unused(unused_model, unused_model);
 
@@ -159,13 +156,14 @@ void run() {
 
   // add dream operators
   auto image_size = FLAGS_size;
-  for (int i = 1; i < FLAGS_epochs / FLAGS_scale_runs; i++) {
+  for (int i = 1; i < FLAGS_iters / FLAGS_scale_runs; i++) {
     image_size = image_size * 100 / (100 + FLAGS_percent_incr);
   }
   if (image_size < 20) {
     image_size = 20;
   }
-  AddNaive(dream, display, image_size);
+  auto colors = base.init.net.op(0).arg(0).ints(1);
+  AddNaive(dream, display, image_size, colors);
 
   // set model to use CUDA
   if (FLAGS_device != "cpu") {
@@ -193,7 +191,7 @@ void run() {
     auto &input_name = dream.predict.Input(0);
     TensorCPU input;
     std::vector<int> x;
-    TensorUtil(input).ReadImages({FLAGS_file}, image_size, x, 128);
+    TensorUtil(input).ReadImages({FLAGS_file}, image_size, image_size, x, 128);
     BlobUtil(*workspace.GetBlob(input_name)).Set(input);
   }
 
@@ -205,14 +203,13 @@ void run() {
     auto image = BlobUtil(*workspace.GetBlob("image")).Get();
     TensorUtil(image).ShowImages("dream");
 
-    auto &figure = PlotUtil::Shared("loss");
-    figure.Get("rescale").Set(std::vector<float>(), PlotUtil::Vertical,
-                              PlotUtil::Gray());
-    figure.Show();
+    auto &figure = cvplot::figure("loss");
+    figure.series("rescale").type(cvplot::Vertical).color(cvplot::Gray);
+    figure.show();
   }
 
   // run predictor
-  for (auto step = 0; step < FLAGS_epochs;) {
+  for (auto step = 0; step < FLAGS_iters;) {
     // scale up image tiny bit
     image_size =
         std::min(image_size * (100 + FLAGS_percent_incr) / 100, FLAGS_size);
@@ -257,9 +254,9 @@ void run() {
       }
     }
     if (FLAGS_display) {
-      auto &figure = PlotUtil::Shared("loss");
-      figure.Get("rescale").Append(step);
-      figure.Show();
+      auto &figure = cvplot::figure("loss");
+      figure.series("rescale").addValue(step);
+      figure.show();
     }
   }
 

@@ -35,7 +35,7 @@ Check out the original Caffe2 Python tutorials at [https://caffe2.ai/docs/tutori
 
     On Ubuntu:
 
-        apt-get install cmake libgoogle-glog-dev libprotobuf-dev libleveldb-dev libopencv-dev libeigen3-dev
+        apt-get install cmake libgoogle-glog-dev libprotobuf-dev libleveldb-dev libopencv-dev libeigen3-dev curl
 
     In case you're using CUDA an run into CMake issues with `NCCL`, try adding this to your `.bashrc` (assuming Caffe2 at `$HOME/caffe2`):
 
@@ -102,6 +102,14 @@ To classify `giraffe.jpg`:
 
 This tutorial is also a good test to see if OpenCV is working properly.
 
+To export a model from Python:
+
+    model = model_helper.ModelHelper(..)
+    with open("init_net.pb", 'wb') as f:
+      f.write(model.param_init_net._net.SerializeToString())
+    with open("predict_net.pb", 'wb') as f:
+      f.write(model.net._net.SerializeToString())
+
 See also:
 
 - [Image Pre-Processing](https://caffe2.ai/docs/tutorial-image-pre-processing.html)
@@ -122,6 +130,8 @@ To see the training in action, run with `--display`:
 
 <img src="script/mnist.jpg" alt="MNIST" width="300"/>
 
+After testing the trained model is stored in `tmp/mnist_init_net.pb` and `tmp/mnist_predict_net.pb`. For an example implentation of how to use this trained model, take a look at `predict_example()` in [mnist.cc](https://github.com/leonardvandriel/caffe2_cpp_tutorial/blob/master/src/caffe2/binaries/mnist.cc#L321). This implementation is "pure" Caffe2 and does not rely on any helper methods. For an implementation that does use helper methods, take a look at `imagenet`.
+
 ## RNNs and LSTM Networks
 
 In [The Unreasonable Effectiveness of Recurrent Neural Networks](http://karpathy.github.io/2015/05/21/rnn-effectiveness/) Andrej Karpathy describes how to train a recurrent neural network (RNN) on a large volume of text and how to generate new text using such a network. The Caffe2 tutorial [RNNs and LSTM Networks](https://caffe2.ai/docs/RNNs-and-LSTM-networks.html) covers this technique using the [char_rnn.py](https://github.com/caffe2/caffe2/blob/master/caffe2/python/examples/char_rnn.py) script.
@@ -130,17 +140,17 @@ This tutorial is transcribed in [rnn.cc](src/caffe2/binaries/rnn.cc). It takes t
 
     ./bin/rnn
 
-In contrast to the tutorial, this script terminates after 10K iterations. To get more, use `--epochs`:
+In contrast to the tutorial, this script terminates after 10K iterations. To get more, use `--iters`:
 
-    ./bin/run --epochs 100000
+    ./bin/run --iters 100000
 
 To get better results (loss < 1), expand the hidden layer:
 
-    ./bin/rnn --epochs 100000 --batch 32 --hidden_size 512 --seq_length 32
+    ./bin/rnn --iters 100000 --batch 32 --hidden_size 512 --seq_length 32
 
 The file `res/dickens.txt` contains a larger volume of text. Because the writing is a bit more recent, it's more challenging to generate convincing results. Also, single newlines are stripped to allow for more creativity.
 
-    ./bin/rnn --epochs 100000 --batch 32 --hidden_size 768 --seq_length 32 --train_data res/dickens.txt
+    ./bin/rnn --iters 100000 --batch 32 --hidden_size 768 --seq_length 32 --train_data res/dickens.txt
 
 After 200K runs, the loss has not dropped below 36, in contrast to the shakespeare text. Perhaps this requires an additional hidden layer in the LSTM model.
 
@@ -150,7 +160,7 @@ Much of the progress in image recognition is published after the yearly [ImageNe
 
 To classify the content of an image, run:
 
-    ./bin/imagenet --model <model-name> --file <some-image>
+    ./bin/imagenet --model resnet101 --file res/image_file.jpg
 
 Where the model name is one of the following:
 
@@ -159,6 +169,7 @@ Where the model name is one of the following:
 * `squeezenet`: [SqueezeNet](https://github.com/DeepScale/SqueezeNet)
 * `vgg16` and `vgg19`: [VGG Team](http://www.robots.ox.ac.uk/~vgg/research/very_deep/)
 * `resnet50`, `resnet101`, `resnet152`: [MSRA](https://github.com/KaimingHe/deep-residual-networks)
+* `mobilenet`, `mobilenet50`, `mobilenet25`: [MobileNet](https://research.googleblog.com/2017/06/mobilenets-open-source-models-for.html)
 
 <img src="script/imagenet.jpg" alt="ImageNet Classifiers" width="313"/>
 
@@ -167,6 +178,11 @@ The pre-trained weights for these models are automatically downloaded and stored
 	./script/download_extra.sh
 
 Additional models can be made available on request!
+
+To classify an image using a model that you trained yourself, specify the location of the init and predict `.pb` file including a `%` character. For example:
+
+    ./bin/imagenet --model res/mobilenet_%_net.pb --file res/image_file.jpg
+
 
 See also:
 
@@ -202,6 +218,12 @@ You can also provide your own pre-trained model. Specify the location of the ini
 
     ./bin/train --model res/googlenet_%_net.pb --folder res/images --layer pool5/7x7_s1
 
+After the test runs, the model is saved in the `--folder` under the name `_<layer>_<model>_<init/predict>_net.pb`. Please note that you'll need to specify the generated class .txt file by using the `--classes` flag. You can now use this model like any other, for example in the `imagenet` example:
+
+    ./bin/imagenet --model res/images/_pool5_7x7_s1_googlenet_%_net.pb --file res/images/dog/Tjoise.jpg --classes res/images/_pool5_7x7_s1_classes.txt
+
+Another example implementation of a classifier can be found in [mnist.cc](https://github.com/leonardvandriel/caffe2_cpp_tutorial/blob/master/src/caffe2/binaries/mnist.cc#L321), see `predict_example()`.
+
 See also:
 
 - [How to Retrain Inception's Final Layer for New Categories](https://www.tensorflow.org/tutorials/image_retraining)
@@ -211,7 +233,7 @@ See also:
 
 To fully train an existing image classification model from scratch, run without the `--layer` option:
 
-    ./bin/train --model googlenet --folder res/images
+    ./bin/train --model resnet50 --folder res/images
 
 The models currently available for training are the ones listed in the [ImageNet](#imagenet-classifiers) section. This will take a lot of time even when runnning on the GPU.
 
@@ -261,13 +283,9 @@ See also:
 
 ## Plots
 
-Some of the examples have a `--display` option, which will show an OpenCV window with images and plots covering the training progress. This windows and plots mini framework is defined in [window.h](include/caffe2/util/window.h) and [plot.h](include/caffe2/util/plot.h). To see a short demo, run:
-
-    ./bin/plot
+Some of the examples have a `--display` option, which will show an OpenCV window with images and plots covering the training progress. These graphs are drawn using the [cvplot](https://github.com/leonardvandriel/cvplot) framework.
 
 <img src="script/plot.jpg" alt="Plot Examples" width="450"/>
-
-The style of windows and colors are intentionally pale and pixelated to give a dated feel to the whole thing.
 
 ## Troubleshooting
 

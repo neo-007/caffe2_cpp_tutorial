@@ -8,6 +8,7 @@
 #include "caffe2/util/blob.h"
 #include "caffe2/util/model.h"
 #include "caffe2/util/net.h"
+#include "caffe2/util/progress.h"
 #include "caffe2/util/tensor.h"
 #include "caffe2/util/train.h"
 
@@ -17,8 +18,25 @@
 namespace caffe2 {
 
 static std::map<int, int> percentage_for_run({
-    {kRunTest, 10}, {kRunValidate, 20}, {kRunTrain, 70},
+    {kRunTest, 10},
+    {kRunValidate, 20},
+    {kRunTrain, 70},
 });
+
+bool exists_any(const std::string &folder) {
+  struct stat s;
+  return !stat(folder.c_str(), &s);
+}
+
+bool exists_dir(const std::string &folder) {
+  struct stat s;
+  return !stat(folder.c_str(), &s) && (s.st_mode & S_IFDIR);
+}
+
+bool exists_file(const std::string &folder) {
+  struct stat s;
+  return !stat(folder.c_str(), &s) && (s.st_mode & S_IFREG);
+}
 
 std::string filename_to_key(const std::string &filename) {
   // return filename;
@@ -27,9 +45,10 @@ std::string filename_to_key(const std::string &filename) {
 
 void load_labels(const std::string &folder, const std::string &path_prefix,
                  std::vector<std::string> &class_labels,
-                 std::vector<std::pair<std::string, int>> &image_files) {
+                 std::vector<std::pair<std::string, int>> &image_files,
+                 std::vector<int> &class_size) {
   auto classes_text_path = path_prefix + "classes.txt";
-  ;
+
   std::ifstream infile(classes_text_path);
   std::string line;
   while (std::getline(infile, line)) {
@@ -47,7 +66,7 @@ void load_labels(const std::string &folder, const std::string &path_prefix,
       auto class_name = entry->d_name;
       auto class_path = folder + '/' + class_name;
       if (class_name[0] != '.' && class_name[0] != '_' &&
-          !stat(class_path.c_str(), &s) && (s.st_mode & S_IFDIR)) {
+          exists_dir(class_path)) {
         auto subdir = opendir(class_path.c_str());
         if (subdir) {
           auto class_index =
@@ -59,9 +78,12 @@ void load_labels(const std::string &folder, const std::string &path_prefix,
           while ((entry = readdir(subdir))) {
             auto image_file = entry->d_name;
             auto image_path = class_path + '/' + image_file;
-            if (image_file[0] != '.' && !stat(image_path.c_str(), &s) &&
-                (s.st_mode & S_IFREG)) {
+            if (image_file[0] != '.' && exists_file(image_path)) {
               image_files.push_back({image_path, class_index});
+              if (class_size.size() <= class_index) {
+                class_size.resize(class_index + 1);
+              }
+              class_size[class_index]++;
             }
           }
           closedir(subdir);
@@ -80,40 +102,20 @@ void load_labels(const std::string &folder, const std::string &path_prefix,
     }
     class_file.close();
   }
-  auto classes_header_path = path_prefix + "classes.h";
-  std::ofstream labels_file(classes_header_path.c_str());
-  if (labels_file.is_open()) {
-    labels_file << "const char * retrain_classes[] {";
-    bool first = true;
-    for (auto &label : class_labels) {
-      if (first) {
-        first = false;
-      } else {
-        labels_file << ',';
-      }
-      labels_file << std::endl << '"' << label << '"';
-    }
-    labels_file << std::endl << "};" << std::endl;
-    labels_file.close();
-  }
 }
 
 int write_batch(Workspace &workspace, ModelUtil &model, std::string &input_name,
                 std::string &output_name,
                 std::vector<std::pair<std::string, int>> &batch_files,
-                std::unique_ptr<db::DB> *database, int size_to_fit) {
-  std::unique_ptr<db::Transaction> transaction[kRunNum];
-  for (int i = 0; i < kRunNum; i++) {
-    transaction[i] = database[i]->NewTransaction();
-  }
-
+                std::unique_ptr<db::Transaction> *transaction, int width,
+                int height) {
   std::vector<std::string> filenames;
   for (auto &pair : batch_files) {
     filenames.push_back(pair.first);
   }
   std::vector<int> indices;
   TensorCPU input;
-  TensorUtil(input).ReadImages(filenames, size_to_fit, indices);
+  TensorUtil(input).ReadImages(filenames, width, height, indices);
   TensorCPU output;
   if (model.predict.net.external_input_size() && input.size() > 0) {
     BlobUtil(*workspace.GetBlob(input_name)).Set(input);
@@ -155,23 +157,21 @@ int write_batch(Workspace &workspace, ModelUtil &model, std::string &input_name,
       }
     }
   }
-
-  for (int i = 0; i < kRunNum; i++) {
-    transaction[i]->Commit();
-  }
-
   return indices.size();
 }
 
 int preprocess(const std::vector<std::pair<std::string, int>> &image_files,
                const std::string *db_paths, ModelUtil &model,
-               const std::string &db_type, int batch_size, int size_to_fit) {
+               const std::string &db_type, int batch_size, int width,
+               int height, const std::set<std::string> &already) {
   std::unique_ptr<db::DB> database[kRunNum];
+  std::unique_ptr<db::Transaction> transaction[kRunNum];
   for (int i = 0; i < kRunNum; i++) {
-    database[i] = db::CreateDB(db_type, db_paths[i], db::WRITE);
+    auto mode = (exists_dir(db_paths[i]) ? db::WRITE : db::NEW);
+    database[i] = db::CreateDB(db_type, db_paths[i], mode);
+    transaction[i] = database[i]->NewTransaction();
   }
-  auto image_count = 0;
-  auto sample_count = 0;
+  auto image_count = 0, sample_count = 0, transaction_count = 0;
   Workspace workspace;
   CAFFE_ENFORCE(workspace.RunNetOnce(model.init.net));
   if (model.predict.net.external_input_size()) {
@@ -184,69 +184,78 @@ int preprocess(const std::vector<std::pair<std::string, int>> &image_files,
                          ? model.predict.net.external_output(0)
                          : "";
   std::vector<std::pair<std::string, int>> batch_files;
+  Progress progress(image_files.size());
   for (auto &pair : image_files) {
+    progress.update();
     auto &filename = pair.first;
     auto class_index = pair.second;
     image_count++;
-    auto in_db = false;
     auto key = filename_to_key(filename);
-    for (int i = 0; i < kRunNum && !in_db; i++) {
-      auto cursor = database[i]->NewCursor();
-      cursor->Seek(key);
-      in_db |= (cursor->Valid() && cursor->key() == key);
-    }
-    if (in_db) {
+    if (already.find(key) != already.end()) {
       sample_count++;
     } else {
       batch_files.push_back({filename, class_index});
     }
-    if (image_count % 10 == 0) {
-      std::cerr << '\r' << std::string(40, ' ') << '\r' << "pre-processing.. "
-                << image_count << '/' << image_files.size() << " "
-                << std::setprecision(3)
-                << ((float)100 * image_count / image_files.size()) << "%"
-                << std::flush;
-    }
     if (batch_files.size() == batch_size) {
-      sample_count += write_batch(workspace, model, input_name, output_name,
-                                  batch_files, database, size_to_fit);
+      auto count = write_batch(workspace, model, input_name, output_name,
+                               batch_files, transaction, width, height);
+      sample_count += count;
+      transaction_count += count;
       batch_files.clear();
+    }
+    if (transaction_count > 1000) {
+      for (int i = 0; i < kRunNum; i++) {
+        transaction[i]->Commit();
+        transaction[i] = NULL;
+        transaction[i] = database[i]->NewTransaction();
+      }
+      transaction_count = 0;
     }
   }
   if (batch_files.size() > 0) {
     sample_count += write_batch(workspace, model, input_name, output_name,
-                                batch_files, database, size_to_fit);
+                                batch_files, transaction, width, height);
+  }
+  for (int i = 0; i < kRunNum; i++) {
+    transaction[i]->Commit();
   }
   for (int i = 0; i < kRunNum; i++) {
     CAFFE_ENFORCE(database[i]->NewCursor()->Valid(),
                   "database " + name_for_run[i] + " is empty");
   }
-  std::cerr << '\r' << std::string(80, ' ') << '\r';
-
+  progress.wipe();
   return sample_count;
 }
 
 void preprocess(const std::vector<std::pair<std::string, int>> &image_files,
                 const std::string *db_paths, const std::string &db_type,
-                int size_to_fit) {
+                int width, int height) {
   NetDef n;
   ModelUtil none(n, n);
-  preprocess(image_files, db_paths, none, db_type, 64, size_to_fit);
+  std::set<std::string> keys;
+  preprocess(image_files, db_paths, none, db_type, 64, width, height, keys);
 }
 
-int count_samples(const std::string *db_paths, const std::string &db_type) {
+int count_samples(const std::string *db_paths, const std::string &db_type,
+                  int est_size, std::set<std::string> &keys) {
   std::unique_ptr<db::DB> database[kRunNum];
   for (int i = 0; i < kRunNum; i++) {
-    database[i] = db::CreateDB(db_type, db_paths[i], db::WRITE);
+    database[i] = exists_dir(db_paths[i])
+                      ? db::CreateDB(db_type, db_paths[i], db::READ)
+                      : NULL;
   }
   auto sample_count = 0;
+  Progress progress(est_size);
   for (int i = 0; i < kRunNum; i++) {
-    auto cursor = database[i]->NewCursor();
-    while (cursor->Valid()) {
-      sample_count++;
-      cursor->Next();
+    if (database[i] != NULL) {
+      for (auto cursor = database[i]->NewCursor(); cursor->Valid();
+           cursor->Next(), progress.update()) {
+        keys.insert(cursor->key());
+        sample_count++;
+      }
     }
   }
+  progress.wipe();
   return sample_count;
 }
 
